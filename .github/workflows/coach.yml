@@ -1,1 +1,45 @@
+name: Coach Feed (smoke)
+on:
+  workflow_dispatch:
+  push:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Find or create Coach Feed issue
+        id: issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const title = "Coach Feed";
+            const res = await github.rest.search.issuesAndPullRequests({
+              q: `repo:${owner}/${repo} is:issue in:title "${title}" state:open`
+            });
+            let number;
+            if (res.data.total_count) {
+              number = res.data.items[0].number;
+            } else {
+              const created = await github.rest.issues.create({
+                owner, repo, title, body: "Automated diagnostics stream. Pin this issue."
+              });
+              number = created.data.number;
+            }
+            core.setOutput("number", String(number));
+
+      - name: Post comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: Number("${{ steps.issue.outputs.number }}"),
+              body: "✅ Smoke test OK — workflow can comment."
+            });
 
