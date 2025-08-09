@@ -6,7 +6,6 @@ on:
     - cron: "*/5 * * * *"
   workflow_dispatch:
 
-# Repo-level permission hint: Settings → Actions → Workflow permissions → Read and write
 permissions:
   contents: read
   issues: write
@@ -52,7 +51,6 @@ jobs:
         continue-on-error: true
         run: |
           [ -f requirements.txt ] && pip install -r requirements.txt || true
-          # Ensure pytest if tests exist
           if [ -d tests ] || ls -1 **/tests 2>/dev/null; then
             python - <<'PY'
 import importlib, subprocess, sys
@@ -90,83 +88,45 @@ PY
             echo '```'
           } > coach_summary.md
 
-      - name: Node diagnostics
-        if: steps.detect.outputs.has_node == 'true'
-        continue-on-error: true
-        run: |
-          {
-            echo; echo "## Node diagnostics"
-            echo '```bash'; node -v || true; npm -v || true; echo '```'
-
-            echo; echo "### npm test"
-            echo '```'
-            npm test --silent --if-present || true
-            echo '```'
-
-            echo; echo "### npm run lint"
-            echo '```'
-            npm run lint --silent --if-present || true
-            echo '```'
-
-            echo; echo "### npm run build"
-            echo '```'
-            npm run build --silent --if-present || true
-            echo '```'
-          } >> coach_summary.md
-
-      - name: Python diagnostics
-        if: steps.detect.outputs.has_python == 'true'
-        continue-on-error: true
-        run: |
-          {
-            echo; echo "## Python diagnostics"
-            echo '```bash'; python --version || true; pip --version || true; echo '```'
-            if [ -d tests ] || ls -1 **/tests 2>/dev/null; then
-              echo; echo "### pytest"
-              echo '```'; pytest -q || true; echo '```'
-            fi
-            # flake8 only if available
-            python - <<'PY' >/dev/null 2>&1 || true
-import importlib, sys; sys.exit(0 if importlib.util.find_spec("flake8") else 1)
-PY
-            if [ $? -eq 0 ]; then
-              echo; echo "### flake8"
-              echo '```'; flake8 || true; echo '```'
-            fi
-          } >> coach_summary.md
-
-      - name: Footer
-        run: |
-          {
-            echo
-            echo "---"
-            echo "Repo: ${{ github.repository }}"
-            echo "Ref: ${{ github.ref }}"
-            echo "Run: ${{ github.run_id }}"
-            echo "Event: ${{ github.event_name }}"
-            echo "Time: $(date -u +"%Y-%m-%d %H:%M:%S") UTC"
-          } >> coach_summary.md
-
-      - name: Find or create Coach Feed issue
+      - name: Resolve issue number from variable or fallback
         id: issue
         uses: actions/github-script@v7
+        env:
+          COACH_ISSUE: ${{ vars.COACH_ISSUE }}
         with:
           script: |
             const {owner, repo} = context.repo;
-            const title = "Coach Feed";
-            const res = await github.rest.search.issuesAndPullRequests({
-              q: `repo:${owner}/${repo} is:issue in:title "${title}" state:open`
-            });
-            let number;
-            if (res.data.total_count) {
-              number = res.data.items[0].number;
-            } else {
-              const created = await github.rest.issues.create({
-                owner, repo, title, body: "Automated diagnostics stream. Pin this issue for easy access."
-              });
-              number = created.data.number;
+            let n = process.env.COACH_ISSUE && /^\d+$/.test(process.env.COACH_ISSUE)
+              ? parseInt(process.env.COACH_ISSUE, 10)
+              : null;
+
+            // If a number is provided, verify it exists
+            if (n) {
+              try {
+                await github.rest.issues.get({owner, repo, issue_number: n});
+              } catch (e) {
+                n = null; // invalid or missing, fall through
+              }
             }
-            core.setOutput("number", String(number));
+
+            if (!n) {
+              // Try to find an open issue titled exactly "Coach Feed"
+              const res = await github.rest.search.issuesAndPullRequests({
+                q: `repo:${owner}/${repo} is:issue in:title "Coach Feed" state:open`
+              });
+              if (res.data.total_count > 0) {
+                n = res.data.items[0].number;
+              } else {
+                // Create one if missing
+                const created = await github.rest.issues.create({
+                  owner, repo, title: "Coach Feed",
+                  body: "Automated diagnostics stream. Pin this issue for easy access."
+                });
+                n = created.data.number;
+              }
+            }
+
+            core.setOutput("number", String(n));
 
       - name: Post comment to issue
         uses: actions/github-script@v7
@@ -179,3 +139,15 @@ PY
               issue_number: Number("${{ steps.issue.outputs.number }}"),
               body: fs.readFileSync('coach_summary.md','utf8')
             });
+
+      - name: Footer
+        run: |
+          {
+            echo
+            echo "---"
+            echo "Repo: ${{ github.repository }}"
+            echo "Ref: ${{ github.ref }}"
+            echo "Run: ${{ github.run_id }}"
+            echo "Event: ${{ github.event_name }}"
+            echo "Time: $(date -u +"%Y-%m-%d %H:%M:%S") UTC"
+          } >> coach_summary.md
