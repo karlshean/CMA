@@ -1,0 +1,118 @@
+name: Coach Feed
+on: {push: {}, schedule: [{cron: "*/5 * * * *"}], workflow_dispatch: {}}
+permissions: {contents: read, issues: write}
+jobs:
+  coach:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 20}
+
+      - id: detect
+        run: |
+          echo "has_node=false" >> $GITHUB_OUTPUT
+          echo "has_python=false" >> $GITHUB_OUTPUT
+          [ -f package.json ] && echo "has_node=true" >> $GITHUB_OUTPUT
+          { [ -f requirements.txt ] || ls -1 **/requirements.txt 2>/dev/null; } && echo "has_python=true" >> $GITHUB_OUTPUT
+
+      - if: steps.detect.outputs.has_node == 'true'
+        uses: actions/setup-node@v4
+        with: {node-version: "20"}
+
+      - if: steps.detect.outputs.has_python == 'true'
+        uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+
+      - if: steps.detect.outputs.has_node == 'true'
+        run: |
+          if [ -f package-lock.json ]; then npm ci || npm install; else npm install || true; fi
+
+      - if: steps.detect.outputs.has_python == 'true'
+        run: |
+          set -o pipefail
+          [ -f requirements.txt ] && pip install -r requirements.txt
+          if [ -d tests ] || ls -1 **/tests 2>/dev/null; then python - <<'PY'
+import importlib, subprocess, sys
+try: importlib.import_module("pytest")
+except ImportError: subprocess.check_call([sys.executable, "-m", "pip", "install", "pytest"])
+PY
+          fi
+
+      - id: diff
+        run: |
+          set -e
+          if [ "${{ github.event_name }}" = "push" ]; then
+            BEFORE="${{ github.event.before }}"; AFTER="${{ github.event.after }}"
+            [ "$BEFORE" = "0000000000000000000000000000000000000000" -o -z "$BEFORE" ] && RANGE="HEAD~1..HEAD" || RANGE="$BEFORE..$AFTER"
+          else
+            git fetch --all --prune
+            A=$(git rev-parse HEAD); B=$(git rev-parse HEAD~1); RANGE="$B..$A"
+          fi
+          {
+            echo "## Changed files"
+            echo '```'
+            git diff --name-only $RANGE || true
+            echo '```'
+            echo; echo "## Short diff (first 200 lines)"
+            echo '```diff'
+            git diff --unified=1 $RANGE | head -n 200 || true
+            echo '```'
+          } > coach_summary.md
+
+      - if: steps.detect.outputs.has_node == 'true'
+        continue-on-error: true
+        run: |
+          {
+            echo; echo "## Node diagnostics"
+            echo '```bash'; node -v || true; npm -v || true; echo '```'
+            echo; echo "### npm test"; echo '```'; npm test --silent --if-present || true; echo '```'
+            echo; echo "### npm run lint"; echo '```'; npm run lint --silent --if-present || true; echo '```'
+            echo; echo "### npm run build"; echo '```'; npm run build --silent --if-present || true; echo '```'
+          } >> coach_summary.md
+
+      - if: steps.detect.outputs.has_python == 'true'
+        continue-on-error: true
+        run: |
+          {
+            echo; echo "## Python diagnostics"
+            echo '```bash'; python --version || true; pip --version || true; echo '```'
+            if [ -d tests ] || ls -1 **/tests 2>/dev/null; then
+              echo; echo "### pytest"; echo '```'; pytest -q || true; echo '```'
+            fi
+            python - <<'PY' >/dev/null 2>&1 || true
+import importlib; import sys; sys.exit(0 if importlib.util.find_spec("flake8") else 1)
+PY
+            if [ $? -eq 0 ]; then echo; echo "### flake8"; echo '```'; flake8 || true; echo '```'; fi
+          } >> coach_summary.md
+
+      - run: |
+          {
+            echo; echo "---"
+            echo "Repo: ${{ github.repository }}"
+            echo "Ref: ${{ github.ref }}"
+            echo "Run: ${{ github.run_id }}"
+            echo "Event: ${{ github.event_name }}"
+            echo "Time: $(date -u +"%Y-%m-%d %H:%M:%S") UTC"
+          } >> coach_summary.md
+
+      - id: issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const title = "Coach Feed";
+            const res = await github.rest.search.issuesAndPullRequests({ q: `repo:${owner}/${repo} is:issue in:title "${title}" state:open` });
+            let number = res.data.total_count ? res.data.items[0].number :
+              (await github.rest.issues.create({owner, repo, title, body: "Automated diagnostics stream. Pin this issue for easy access."})).data.number;
+            core.setOutput("number", number.toString());
+
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: Number("${{ steps.issue.outputs.number }}"),
+              body: fs.readFileSync('coach_summary.md','utf8')
+            });
