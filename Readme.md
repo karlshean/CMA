@@ -1,2 +1,1 @@
-# Catholic Mass App
-Initial commit. More to come.
+# Catholic Mass App\nInitial commit. More to come.
